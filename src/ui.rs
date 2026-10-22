@@ -1,20 +1,32 @@
-use std::{cell::RefCell, path::Path, rc::Rc, time::Duration};
+use std::{cell::RefCell, collections::HashMap, path::Path, rc::Rc, time::Duration};
 
 use gtk::{gdk, glib, prelude::*};
 use niri_keymap_help::{
     config::{Binding, DescriptionSource, LoadReport},
     search,
+    sort::{self, SortMode},
     watch::Watcher,
 };
 
 struct Row {
     binding: Binding,
     widget: gtk::ListBoxRow,
+    description: gtk::Label,
+}
+
+/// Read by the ListBox header function. Kept outside `View` because GTK
+/// calls that function synchronously while `View` is mutably borrowed.
+#[derive(Default)]
+struct Headers {
+    grouped: bool,
+    visible: HashMap<String, usize>,
 }
 
 struct View {
     rows: Vec<Row>,
     loaded: bool,
+    mode: SortMode,
+    headers: Rc<RefCell<Headers>>,
     list: gtk::ListBox,
     search: gtk::SearchEntry,
     count: gtk::Label,
@@ -29,14 +41,23 @@ impl View {
         let query = self.search.text();
         let mut visible = 0;
         let mut missing = 0;
+        let mut groups = HashMap::new();
         for row in &self.rows {
             let matches = search::matches(&row.binding, &query);
             row.widget.set_visible(matches);
             if matches {
                 visible += 1;
                 missing += usize::from(row.binding.description.is_none());
+                *groups
+                    .entry(sort::group_of(&row.binding).to_owned())
+                    .or_insert(0) += 1;
             }
         }
+        *self.headers.borrow_mut() = Headers {
+            grouped: self.mode == SortMode::Grouped,
+            visible: groups,
+        };
+        self.list.invalidate_headers();
         self.count
             .set_text(&format!("{visible} of {} bindings", self.rows.len()));
         self.missing
@@ -56,6 +77,35 @@ impl View {
         }
     }
 
+    /// Re-append rows in the current sort order. In grouped mode the header
+    /// shows the group, so descriptions drop their `Group:` prefix.
+    fn apply_order(&self) {
+        for row in &self.rows {
+            if row.widget.parent().is_some() {
+                self.list.remove(&row.widget);
+            }
+        }
+        let bindings: Vec<_> = self.rows.iter().map(|row| row.binding.clone()).collect();
+        for index in sort::order(&bindings, self.mode) {
+            let row = &self.rows[index];
+            if let Some(description) = &row.binding.description {
+                let text = match self.mode {
+                    SortMode::Grouped => sort::split_group(description)
+                        .map_or(description.as_str(), |(_, rest)| rest),
+                    _ => description.as_str(),
+                };
+                row.description.set_text(text);
+            }
+            self.list.append(&row.widget);
+        }
+    }
+
+    fn set_mode(&mut self, mode: SortMode) {
+        self.mode = mode;
+        self.apply_order();
+        self.filter(true);
+    }
+
     fn update(&mut self, report: LoadReport) {
         match report.result {
             Ok(snapshot) => {
@@ -64,10 +114,15 @@ impl View {
                     self.list.remove(&row.widget);
                 }
                 for binding in snapshot.bindings {
-                    let widget = binding_row(&binding);
-                    self.list.append(&widget);
-                    self.rows.push(Row { binding, widget });
+                    let (widget, description) = binding_row(&binding);
+                    widget.set_widget_name(sort::group_of(&binding));
+                    self.rows.push(Row {
+                        binding,
+                        widget,
+                        description,
+                    });
                 }
+                self.apply_order();
                 self.loaded = true;
                 self.message.remove_css_class("error-message");
                 self.message.set_text(&snapshot.warnings.join("\n"));
@@ -92,7 +147,7 @@ impl View {
     }
 }
 
-pub fn build(app: &gtk::Application, path: &Path) {
+pub fn build(app: &gtk::Application, path: &Path, mode: SortMode) {
     let provider = gtk::CssProvider::new();
     provider.load_from_data(include_str!("style.css"));
     if let Some(display) = gdk::Display::default() {
@@ -140,7 +195,13 @@ pub fn build(app: &gtk::Application, path: &Path) {
     let missing = gtk::Label::new(None);
     missing.add_css_class("missing-count");
     missing.set_visible(false);
+    let labels = SortMode::ALL.map(SortMode::label);
+    let sort_mode = gtk::DropDown::from_strings(&labels);
+    sort_mode.set_focusable(false);
+    sort_mode.set_tooltip_text(Some("Sort order (Ctrl+S cycles)"));
+    sort_mode.set_selected(SortMode::ALL.iter().position(|&m| m == mode).unwrap_or(0) as u32);
     summary.append(&count);
+    summary.append(&sort_mode);
     summary.append(&missing);
     top.append(&summary);
     content.append(&top);
@@ -167,6 +228,27 @@ pub fn build(app: &gtk::Application, path: &Path) {
         .focusable(false)
         .build();
     list.add_css_class("bindings");
+    let headers = Rc::new(RefCell::new(Headers::default()));
+    list.set_header_func(glib::clone!(
+        #[strong]
+        headers,
+        move |row, before| {
+            let headers = headers.borrow();
+            let group = row.widget_name();
+            let starts_group = before.is_none_or(|before| before.widget_name() != group);
+            if !headers.grouped || !starts_group {
+                row.set_header(None::<&gtk::Widget>);
+                return;
+            }
+            let count = headers.visible.get(group.as_str()).copied().unwrap_or(0);
+            let label = gtk::Label::builder()
+                .label(format!("{}  ·  {count}", group.to_uppercase()))
+                .xalign(0.0)
+                .build();
+            label.add_css_class("group-header");
+            row.set_header(Some(&label));
+        }
+    ));
     let scroll = gtk::ScrolledWindow::builder()
         .hscrollbar_policy(gtk::PolicyType::Never)
         .vexpand(true)
@@ -191,13 +273,17 @@ pub fn build(app: &gtk::Application, path: &Path) {
         path.display()
     )));
     footer.append(&source);
-    footer.append(&gtk::Label::new(Some("Esc  clear / close")));
+    footer.append(&gtk::Label::new(Some(
+        "Esc  clear / close   ·   Ctrl+S  sort",
+    )));
     content.append(&footer);
     window.set_child(Some(&content));
 
     let view = Rc::new(RefCell::new(View {
         rows: Vec::new(),
         loaded: false,
+        mode,
+        headers,
         list,
         search: search.clone(),
         count,
@@ -207,6 +293,14 @@ pub fn build(app: &gtk::Application, path: &Path) {
         scroll: scroll.clone(),
     }));
     view.borrow().filter(false);
+    sort_mode.connect_selected_notify(glib::clone!(
+        #[weak]
+        view,
+        move |sort_mode| {
+            let mode = SortMode::ALL[sort_mode.selected() as usize % SortMode::ALL.len()];
+            view.borrow_mut().set_mode(mode);
+        }
+    ));
     search.connect_changed(glib::clone!(
         #[weak]
         view,
@@ -226,6 +320,8 @@ pub fn build(app: &gtk::Application, path: &Path) {
         search,
         #[weak]
         scroll,
+        #[weak]
+        sort_mode,
         #[upgrade_or]
         glib::Propagation::Proceed,
         move |_, key, _, modifiers| {
@@ -235,6 +331,13 @@ pub fn build(app: &gtk::Application, path: &Path) {
                 } else {
                     search.set_text("");
                 }
+                return glib::Propagation::Stop;
+            }
+            if modifiers.contains(gdk::ModifierType::CONTROL_MASK)
+                && matches!(key, gdk::Key::s | gdk::Key::S)
+            {
+                let next = (sort_mode.selected() + 1) % SortMode::ALL.len() as u32;
+                sort_mode.set_selected(next);
                 return glib::Propagation::Stop;
             }
             if key == gdk::Key::Tab || key == gdk::Key::ISO_Left_Tab {
@@ -273,8 +376,11 @@ pub fn build(app: &gtk::Application, path: &Path) {
         search,
         move |window| {
             if window.is_active()
-                && gtk::prelude::GtkWindowExt::focus(window)
-                    .is_none_or(|focus| focus != search && !focus.is_ancestor(&search))
+                && gtk::prelude::GtkWindowExt::focus(window).is_none_or(|focus| {
+                    focus != search
+                        && !focus.is_ancestor(&search)
+                        && focus.ancestor(gtk::Popover::static_type()).is_none()
+                })
             {
                 search.grab_focus();
             }
@@ -304,7 +410,7 @@ pub fn build(app: &gtk::Application, path: &Path) {
     search.grab_focus();
 }
 
-fn binding_row(binding: &Binding) -> gtk::ListBoxRow {
+fn binding_row(binding: &Binding) -> (gtk::ListBoxRow, gtk::Label) {
     let row = gtk::ListBoxRow::builder()
         .activatable(false)
         .selectable(false)
@@ -360,7 +466,7 @@ fn binding_row(binding: &Binding) -> gtk::ListBoxRow {
         binding.action
     )));
     row.set_child(Some(&content));
-    row
+    (row, description)
 }
 
 #[cfg(test)]
@@ -424,7 +530,7 @@ mod tests {
             .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
             .build();
         app.register(None::<&gtk::gio::Cancellable>).unwrap();
-        build(&app, &path);
+        build(&app, &path, SortMode::Config);
         let window = app.windows().into_iter().next().unwrap();
         wait_for(|| has_label(&window, "26 of 26 bindings"));
         let widgets = descendants(&window);
@@ -463,6 +569,15 @@ mod tests {
         search.set_text("no-match-at-all");
         assert!(has_label(&window, "0 of 26 bindings"));
         assert!(has_label(&window, "No matching bindings"));
+
+        search.set_text("");
+        let sort_mode = descendants(&window)
+            .into_iter()
+            .find_map(|widget| widget.downcast::<gtk::DropDown>().ok())
+            .unwrap();
+        sort_mode.set_selected(0);
+        wait_for(|| has_label(&window, "NO DESCRIPTION  ·  24"));
+        assert!(has_label(&window, "OTHER  ·  2"));
         window.close();
         wait_for(|| !window.is_visible());
     }

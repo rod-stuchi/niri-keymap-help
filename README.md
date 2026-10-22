@@ -7,6 +7,12 @@ A GTK4 desktop app for browsing and searching the bindings in your Niri config.
   ignoring case. Every word must match somewhere across these fields:
   `mod terminal kitty` can match `Mod+T`, “Open a Terminal”, and `spawn "kitty"`.
   Search `spawn` to find both `spawn` and `spawn-sh` bindings.
+- By default bindings are grouped by their `Group: action` description prefix
+  (e.g. `Focus: column left` lands under FOCUS as “column left”). Groups appear
+  in the order the config first mentions them; bindings without a prefix go to
+  OTHER, and undocumented ones to NO DESCRIPTION at the end.
+- The sort menu (or Ctrl+S) switches between Grouped, Config order, Key, and
+  Description.
 - Bindings without descriptions have amber keys, a colored edge, and a warning label.
 - Descriptions come from `hotkey-overlay-title`, falling back to an adjacent comment.
 - Config changes reload automatically, including changes to included files.
@@ -32,6 +38,7 @@ The default path is `$XDG_CONFIG_HOME/niri/config.kdl`, falling back to
 
 ```sh
 cargo run --release -- --config /path/to/config.kdl
+cargo run --release -- --sort key   # grouped | config | key | description
 cargo run -- --check
 cargo run -- --help
 ```
@@ -75,6 +82,7 @@ The app does not edit your config or execute any listed bindings.
 | Up / Down | Scroll the results |
 | Page Up / Page Down | Scroll by a page |
 | Escape | Clear the query; close if already empty |
+| Ctrl+S | Cycle the sort order |
 | Ctrl+A | Select the search text |
 
 Focus stays in search when clicking or scrolling the list, and returns there
@@ -120,6 +128,7 @@ on an isolated X server:
 xvfb-run -a env GDK_BACKEND=x11 cargo test --bin niri-keymap-help -- --ignored
 ```
 
-Code is split into `config.rs` (KDL and descriptions), `search.rs`, `watch.rs`
+Code is split into `config.rs` (KDL and descriptions), `search.rs`, `sort.rs`
+(grouping and sort orders), `watch.rs`
 (reload worker), `ui.rs` (GTK), and `style.css`. GTK 0.10 is used with GTK 4.8
 APIs so a newer system GTK release is not required.

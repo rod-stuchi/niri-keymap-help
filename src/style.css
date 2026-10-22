@@ -35,3 +35,12 @@
 .error-message { background: alpha(@error_color, 0.12); }
 .empty-state { padding: 32px; opacity: 0.65; }
 .footer { padding: 12px 24px; font-size: 0.85em; opacity: 0.6; }
+.group-header {
+    padding: 14px 24px 6px;
+    font-size: 0.78em;
+    font-weight: 700;
+    letter-spacing: 1px;
+    opacity: 0.6;
+    background: @theme_bg_color;
+    border-bottom: 1px solid alpha(@theme_fg_color, 0.1);
+}
