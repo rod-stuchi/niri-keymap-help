@@ -15,7 +15,7 @@ fn binding(keys: &str, description: Option<&str>) -> Binding {
 }
 
 fn keys(bindings: &[Binding], mode: SortMode) -> Vec<&str> {
-    sort::order(bindings, mode)
+    sort::order(bindings, mode, "")
         .into_iter()
         .map(|index| bindings[index].keys.as_str())
         .collect()
@@ -86,4 +86,28 @@ fn sort_mode_parses_names() {
     assert_eq!("KEY".parse::<SortMode>(), Ok(SortMode::Key));
     assert!("bogus".parse::<SortMode>().is_err());
     assert_eq!(SortMode::default(), SortMode::Grouped);
+}
+
+#[test]
+fn grouped_order_moves_searched_groups_first() {
+    let bindings = [
+        binding("A", Some("Window: toggle floating")),
+        binding("B", Some("Keyboard: next layout")),
+        binding("C", Some("Toggle: blur")),
+        binding("D", Some("Toggle: shadows")),
+        binding("E", Some("Window: close")),
+    ];
+    let order = |query| -> Vec<&str> {
+        sort::order(&bindings, SortMode::Grouped, query)
+            .into_iter()
+            .map(|index| bindings[index].keys.as_str())
+            .collect()
+    };
+    assert_eq!(order("TOGGLE"), ["C", "D", "A", "E", "B"]);
+    assert_eq!(order("next tog"), ["C", "D", "A", "E", "B"]);
+    assert_eq!(order("zzz"), ["A", "E", "B", "C", "D"]);
+    assert_eq!(
+        sort::order(&bindings, SortMode::Config, "toggle"),
+        [0, 1, 2, 3, 4]
+    );
 }

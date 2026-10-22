@@ -11,6 +11,8 @@ A GTK4 desktop app for browsing and searching the bindings in your Niri config.
   (e.g. `Focus: column left` lands under FOCUS as “column left”). Groups appear
   in the order the config first mentions them; bindings without a prefix go to
   OTHER, and undocumented ones to NO DESCRIPTION at the end.
+  While searching, groups whose name matches a search word move to the top
+  (`toggle` shows TOGGLE first).
 - The sort menu (or Ctrl+S) switches between Grouped, Config order, Key, and
   Description.
 - Bindings without descriptions have amber keys, a colored edge, and a warning label.

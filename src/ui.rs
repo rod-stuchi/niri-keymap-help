@@ -27,6 +27,8 @@ struct View {
     loaded: bool,
     mode: SortMode,
     headers: Rc<RefCell<Headers>>,
+    /// Row indices in display order, to skip re-appending when unchanged.
+    order: RefCell<Vec<usize>>,
     list: gtk::ListBox,
     search: gtk::SearchEntry,
     count: gtk::Label,
@@ -39,6 +41,7 @@ struct View {
 impl View {
     fn filter(&self, reset_scroll: bool) {
         let query = self.search.text();
+        self.apply_order(&query);
         let mut visible = 0;
         let mut missing = 0;
         let mut groups = HashMap::new();
@@ -79,14 +82,18 @@ impl View {
 
     /// Re-append rows in the current sort order. In grouped mode the header
     /// shows the group, so descriptions drop their `Group:` prefix.
-    fn apply_order(&self) {
+    fn apply_order(&self, query: &str) {
+        let bindings: Vec<_> = self.rows.iter().map(|row| row.binding.clone()).collect();
+        let order = sort::order(&bindings, self.mode, query);
+        if *self.order.borrow() == order {
+            return;
+        }
         for row in &self.rows {
             if row.widget.parent().is_some() {
                 self.list.remove(&row.widget);
             }
         }
-        let bindings: Vec<_> = self.rows.iter().map(|row| row.binding.clone()).collect();
-        for index in sort::order(&bindings, self.mode) {
+        for &index in &order {
             let row = &self.rows[index];
             if let Some(description) = &row.binding.description {
                 let text = match self.mode {
@@ -98,11 +105,12 @@ impl View {
             }
             self.list.append(&row.widget);
         }
+        *self.order.borrow_mut() = order;
     }
 
     fn set_mode(&mut self, mode: SortMode) {
         self.mode = mode;
-        self.apply_order();
+        self.order.borrow_mut().clear();
         self.filter(true);
     }
 
@@ -122,7 +130,7 @@ impl View {
                         description,
                     });
                 }
-                self.apply_order();
+                self.order.borrow_mut().clear();
                 self.loaded = true;
                 self.message.remove_css_class("error-message");
                 self.message.set_text(&snapshot.warnings.join("\n"));
@@ -284,6 +292,7 @@ pub fn build(app: &gtk::Application, path: &Path, mode: SortMode) {
         loaded: false,
         mode,
         headers,
+        order: RefCell::default(),
         list,
         search: search.clone(),
         count,

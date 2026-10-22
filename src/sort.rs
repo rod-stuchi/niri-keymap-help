@@ -77,23 +77,30 @@ pub fn group_of(binding: &Binding) -> &str {
 }
 
 /// Display order as indices into `bindings`. Every mode falls back to config
-/// order, so equal entries keep the layout of the config file.
-pub fn order(bindings: &[Binding], mode: SortMode) -> Vec<usize> {
+/// order, so equal entries keep the layout of the config file. In grouped
+/// mode, groups whose name contains a query term are moved to the top.
+pub fn order(bindings: &[Binding], mode: SortMode, query: &str) -> Vec<usize> {
     let mut indices: Vec<usize> = (0..bindings.len()).collect();
     match mode {
         SortMode::Config => {}
         SortMode::Grouped => {
             // Groups appear in the order the config first mentions them;
-            // ungrouped and undocumented bindings always come last.
+            // ungrouped and undocumented bindings come last, unless searched.
             let mut rank = HashMap::new();
             for binding in bindings {
                 let next = rank.len();
                 rank.entry(group_of(binding)).or_insert(next);
             }
-            let key = |group: &str| match group {
-                UNDOCUMENTED => (2, 0),
-                OTHER => (1, 0),
-                group => (0, rank[group]),
+            let terms: Vec<String> = query.split_whitespace().map(str::to_lowercase).collect();
+            let key = |group: &str| {
+                let name = group.to_lowercase();
+                let searched = terms.iter().any(|term| name.contains(term.as_str()));
+                let tier = match group {
+                    UNDOCUMENTED => 2,
+                    OTHER => 1,
+                    _ => 0,
+                };
+                (!searched, tier, rank[group])
             };
             indices.sort_by_key(|&index| key(group_of(&bindings[index])));
         }
