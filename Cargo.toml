@@ -1,0 +1,20 @@
+[package]
+name = "niri-keymap-help"
+version = "0.1.0"
+edition = "2024"
+description = "A searchable GTK4 reference for your Niri key bindings"
+
+[dependencies]
+gtk = { package = "gtk4", version = "0.10.3", features = ["v4_8"] }
+kdl = "4.7.1"
+
+[dev-dependencies]
+tempfile = "3.27"
+
+[profile.dev]
+debug = 0
+
+
+[profile.release]
+lto = "thin"
+strip = true

@@ -1,0 +1,37 @@
+.keymap-window { background: @theme_bg_color; }
+.heading { font-weight: 700; }
+.search-panel { padding: 20px 24px 16px; }
+.search-panel searchentry { min-height: 42px; border-radius: 10px; padding: 0 12px; }
+.dim-label { opacity: 0.65; }
+.missing-count {
+    color: @warning_color;
+    background: alpha(@warning_color, 0.12);
+    padding: 4px 10px;
+    border-radius: 20px;
+    font-size: 0.9em;
+}
+.column-headings {
+    padding: 10px 24px;
+    font-size: 0.78em;
+    font-weight: 700;
+    letter-spacing: 1px;
+    opacity: 0.6;
+    border-top: 1px solid alpha(@theme_fg_color, 0.1);
+    border-bottom: 1px solid alpha(@theme_fg_color, 0.1);
+}
+.bindings { background: @theme_base_color; }
+.binding-row { padding: 15px 24px; border-bottom: 1px solid alpha(@theme_fg_color, 0.07); }
+.binding-row:hover { background: alpha(@theme_fg_color, 0.035); }
+.key-combo { font-family: monospace; font-size: 0.95em; font-weight: 600; }
+.description { font-weight: 500; }
+.action { font-family: monospace; font-size: 0.85em; opacity: 0.5; }
+.missing-description { color: @warning_color; }
+.undocumented { border-left: 3px solid @warning_color; padding-left: 21px; }
+.config-message {
+    padding: 12px 24px;
+    background: alpha(@warning_color, 0.12);
+    color: @theme_fg_color;
+}
+.error-message { background: alpha(@error_color, 0.12); }
+.empty-state { padding: 32px; opacity: 0.65; }
+.footer { padding: 12px 24px; font-size: 0.85em; opacity: 0.6; }

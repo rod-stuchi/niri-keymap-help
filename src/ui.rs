@@ -1,0 +1,469 @@
+use std::{cell::RefCell, path::Path, rc::Rc, time::Duration};
+
+use gtk::{gdk, glib, prelude::*};
+use niri_keymap_help::{
+    config::{Binding, DescriptionSource, LoadReport},
+    search,
+    watch::Watcher,
+};
+
+struct Row {
+    binding: Binding,
+    widget: gtk::ListBoxRow,
+}
+
+struct View {
+    rows: Vec<Row>,
+    loaded: bool,
+    list: gtk::ListBox,
+    search: gtk::SearchEntry,
+    count: gtk::Label,
+    missing: gtk::Label,
+    message: gtk::Label,
+    empty: gtk::Label,
+    scroll: gtk::ScrolledWindow,
+}
+
+impl View {
+    fn filter(&self, reset_scroll: bool) {
+        let query = self.search.text();
+        let mut visible = 0;
+        let mut missing = 0;
+        for row in &self.rows {
+            let matches = search::matches(&row.binding, &query);
+            row.widget.set_visible(matches);
+            if matches {
+                visible += 1;
+                missing += usize::from(row.binding.description.is_none());
+            }
+        }
+        self.count
+            .set_text(&format!("{visible} of {} bindings", self.rows.len()));
+        self.missing
+            .set_text(&format!("{missing} without descriptions"));
+        self.missing.set_visible(missing > 0);
+        self.empty.set_text(if !self.loaded {
+            "Waiting for a readable config…"
+        } else if self.rows.is_empty() {
+            "No active bindings in this config."
+        } else {
+            "No matching bindings. Try a key, description, or command."
+        });
+        self.empty.set_visible(visible == 0);
+        self.scroll.set_visible(visible > 0);
+        if reset_scroll {
+            self.scroll.vadjustment().set_value(0.0);
+        }
+    }
+
+    fn update(&mut self, report: LoadReport) {
+        match report.result {
+            Ok(snapshot) => {
+                let scroll = self.scroll.vadjustment().value();
+                for row in self.rows.drain(..) {
+                    self.list.remove(&row.widget);
+                }
+                for binding in snapshot.bindings {
+                    let widget = binding_row(&binding);
+                    self.list.append(&widget);
+                    self.rows.push(Row { binding, widget });
+                }
+                self.loaded = true;
+                self.message.remove_css_class("error-message");
+                self.message.set_text(&snapshot.warnings.join("\n"));
+                self.message.set_visible(!snapshot.warnings.is_empty());
+                self.filter(false);
+                let adjustment = self.scroll.vadjustment();
+                glib::idle_add_local_once(move || adjustment.set_value(scroll));
+            }
+            Err(error) => {
+                let suffix = if self.loaded {
+                    "Showing the last valid bindings. Updates resume when the config is fixed."
+                } else {
+                    "Updates resume automatically when the config is fixed."
+                };
+                self.message
+                    .set_text(&format!("Could not load config\n{error}\n{suffix}"));
+                self.message.add_css_class("error-message");
+                self.message.set_visible(true);
+                self.filter(false);
+            }
+        }
+    }
+}
+
+pub fn build(app: &gtk::Application, path: &Path) {
+    let provider = gtk::CssProvider::new();
+    provider.load_from_data(include_str!("style.css"));
+    if let Some(display) = gdk::Display::default() {
+        gtk::style_context_add_provider_for_display(
+            &display,
+            &provider,
+            gtk::STYLE_PROVIDER_PRIORITY_APPLICATION,
+        );
+    }
+    let window = gtk::ApplicationWindow::builder()
+        .application(app)
+        .title("Niri Keymap Help")
+        .default_width(920)
+        .default_height(680)
+        .build();
+    window.add_css_class("keymap-window");
+
+    let header = gtk::HeaderBar::new();
+    let title = gtk::Box::new(gtk::Orientation::Horizontal, 8);
+    title.append(&gtk::Image::from_icon_name("input-keyboard-symbolic"));
+    let heading = gtk::Label::new(Some("Niri Keymap Help"));
+    heading.add_css_class("heading");
+    title.append(&heading);
+    header.set_title_widget(Some(&title));
+    window.set_titlebar(Some(&header));
+
+    let content = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    let top = gtk::Box::new(gtk::Orientation::Vertical, 12);
+    top.add_css_class("search-panel");
+    let search = gtk::SearchEntry::builder()
+        .placeholder_text("Search keymaps, descriptions, or commands…")
+        .hexpand(true)
+        .build();
+    search.set_key_capture_widget(Some(&window));
+    search.set_tooltip_text(Some(
+        "Search keys, descriptions, and commands (including arguments). Each word must match; case is ignored.",
+    ));
+    top.append(&search);
+
+    let summary = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    let count = gtk::Label::new(Some("Loading bindings…"));
+    count.set_xalign(0.0);
+    count.set_hexpand(true);
+    count.add_css_class("dim-label");
+    let missing = gtk::Label::new(None);
+    missing.add_css_class("missing-count");
+    missing.set_visible(false);
+    summary.append(&count);
+    summary.append(&missing);
+    top.append(&summary);
+    content.append(&top);
+
+    let message = gtk::Label::builder()
+        .xalign(0.0)
+        .wrap(true)
+        .visible(false)
+        .build();
+    message.add_css_class("config-message");
+    content.append(&message);
+
+    let columns = gtk::Box::new(gtk::Orientation::Horizontal, 24);
+    columns.add_css_class("column-headings");
+    let key_heading = gtk::Label::new(Some("KEYMAP"));
+    key_heading.set_xalign(0.0);
+    key_heading.set_size_request(250, -1);
+    columns.append(&key_heading);
+    columns.append(&gtk::Label::new(Some("DESCRIPTION / ACTION")));
+    content.append(&columns);
+
+    let list = gtk::ListBox::builder()
+        .selection_mode(gtk::SelectionMode::None)
+        .focusable(false)
+        .build();
+    list.add_css_class("bindings");
+    let scroll = gtk::ScrolledWindow::builder()
+        .hscrollbar_policy(gtk::PolicyType::Never)
+        .vexpand(true)
+        .child(&list)
+        .build();
+    scroll.set_can_focus(false);
+    content.append(&scroll);
+    let empty = gtk::Label::builder().wrap(true).vexpand(true).build();
+    empty.add_css_class("empty-state");
+    content.append(&empty);
+
+    let footer = gtk::Box::new(gtk::Orientation::Horizontal, 12);
+    footer.add_css_class("footer");
+    let source = gtk::Label::builder()
+        .label(path.to_string_lossy())
+        .ellipsize(gtk::pango::EllipsizeMode::Middle)
+        .hexpand(true)
+        .xalign(0.0)
+        .build();
+    source.set_tooltip_text(Some(&format!(
+        "{}\nAutomatically reloads when files change.",
+        path.display()
+    )));
+    footer.append(&source);
+    footer.append(&gtk::Label::new(Some("Esc  clear / close")));
+    content.append(&footer);
+    window.set_child(Some(&content));
+
+    let view = Rc::new(RefCell::new(View {
+        rows: Vec::new(),
+        loaded: false,
+        list,
+        search: search.clone(),
+        count,
+        missing,
+        message,
+        empty,
+        scroll: scroll.clone(),
+    }));
+    view.borrow().filter(false);
+    search.connect_changed(glib::clone!(
+        #[weak]
+        view,
+        move |_| {
+            view.borrow().filter(true);
+        }
+    ));
+
+    // Capture Escape before SearchEntry's default handler clears the query,
+    // otherwise the same Escape could both clear it and close the window.
+    let keys = gtk::EventControllerKey::new();
+    keys.set_propagation_phase(gtk::PropagationPhase::Capture);
+    keys.connect_key_pressed(glib::clone!(
+        #[weak]
+        window,
+        #[weak]
+        search,
+        #[weak]
+        scroll,
+        #[upgrade_or]
+        glib::Propagation::Proceed,
+        move |_, key, _, modifiers| {
+            if key == gdk::Key::Escape {
+                if search.text().is_empty() {
+                    window.close();
+                } else {
+                    search.set_text("");
+                }
+                return glib::Propagation::Stop;
+            }
+            if key == gdk::Key::Tab || key == gdk::Key::ISO_Left_Tab {
+                search.grab_focus();
+                return glib::Propagation::Stop;
+            }
+            if !modifiers.intersects(gdk::ModifierType::CONTROL_MASK | gdk::ModifierType::ALT_MASK)
+            {
+                let adjustment = scroll.vadjustment();
+                let delta = match key {
+                    gdk::Key::Down => 64.0,
+                    gdk::Key::Up => -64.0,
+                    gdk::Key::Page_Down => adjustment.page_size() * 0.9,
+                    gdk::Key::Page_Up => -adjustment.page_size() * 0.9,
+                    _ => return glib::Propagation::Proceed,
+                };
+                let max = (adjustment.upper() - adjustment.page_size()).max(0.0);
+                adjustment.set_value((adjustment.value() + delta).clamp(0.0, max));
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        }
+    ));
+    window.add_controller(keys);
+    window.connect_is_active_notify(glib::clone!(
+        #[weak]
+        search,
+        move |window| {
+            if window.is_active() {
+                search.grab_focus();
+            }
+        }
+    ));
+    window.connect_focus_widget_notify(glib::clone!(
+        #[weak]
+        search,
+        move |window| {
+            if window.is_active()
+                && gtk::prelude::GtkWindowExt::focus(window)
+                    .is_none_or(|focus| focus != search && !focus.is_ancestor(&search))
+            {
+                search.grab_focus();
+            }
+        }
+    ));
+
+    let watcher = Watcher::start(path.to_path_buf());
+    glib::timeout_add_local(
+        Duration::from_millis(100),
+        glib::clone!(
+            #[weak]
+            window,
+            #[upgrade_or]
+            glib::ControlFlow::Break,
+            move || {
+                if !window.is_visible() {
+                    return glib::ControlFlow::Break;
+                }
+                if let Some(report) = watcher.updates.try_iter().last() {
+                    view.borrow_mut().update(report);
+                }
+                glib::ControlFlow::Continue
+            }
+        ),
+    );
+    window.present();
+    search.grab_focus();
+}
+
+fn binding_row(binding: &Binding) -> gtk::ListBoxRow {
+    let row = gtk::ListBoxRow::builder()
+        .activatable(false)
+        .selectable(false)
+        .focusable(false)
+        .build();
+    row.add_css_class("binding-row");
+    let content = gtk::Box::new(gtk::Orientation::Horizontal, 24);
+    let keys = gtk::Label::builder()
+        .label(&binding.keys)
+        .xalign(0.0)
+        .yalign(0.0)
+        .wrap(true)
+        .wrap_mode(gtk::pango::WrapMode::WordChar)
+        .width_chars(1)
+        .build();
+    keys.set_size_request(250, -1);
+    keys.add_css_class("key-combo");
+    content.append(&keys);
+
+    let details = gtk::Box::new(gtk::Orientation::Vertical, 5);
+    details.set_hexpand(true);
+    let description = gtk::Label::builder()
+        .label(binding.description.as_deref().unwrap_or("⚠ No description"))
+        .xalign(0.0)
+        .wrap(true)
+        .width_chars(1)
+        .build();
+    description.add_css_class("description");
+    details.append(&description);
+    let action = gtk::Label::builder()
+        .label(&binding.action)
+        .xalign(0.0)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .width_chars(1)
+        .build();
+    action.add_css_class("action");
+    details.append(&action);
+    content.append(&details);
+    if binding.description.is_none() {
+        keys.add_css_class("missing-description");
+        description.add_css_class("missing-description");
+        row.add_css_class("undocumented");
+    }
+    let origin = match binding.description_source {
+        Some(DescriptionSource::Title) => "Description from hotkey-overlay-title",
+        Some(DescriptionSource::Comment) => "Description from an adjacent comment",
+        None => "Add hotkey-overlay-title or an adjacent comment to describe this binding",
+    };
+    row.set_tooltip_text(Some(&format!(
+        "{}:{}\n{origin}\n\n{}",
+        binding.file.display(),
+        binding.line,
+        binding.action
+    )));
+    row.set_child(Some(&content));
+    row
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{fs, thread, time::Instant};
+
+    fn descendants(widget: &impl IsA<gtk::Widget>) -> Vec<gtk::Widget> {
+        let mut result = Vec::new();
+        let mut child = widget.first_child();
+        while let Some(widget) = child {
+            child = widget.next_sibling();
+            result.extend(descendants(&widget));
+            result.push(widget);
+        }
+        result
+    }
+
+    fn wait_for(mut predicate: impl FnMut() -> bool) {
+        let context = glib::MainContext::default();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            while context.pending() {
+                context.iteration(false);
+            }
+            if predicate() {
+                return;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "UI did not reach the expected state"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn has_label(window: &gtk::Window, text: &str) -> bool {
+        descendants(window).iter().any(|widget| {
+            widget
+                .downcast_ref::<gtk::Label>()
+                .is_some_and(|label| label.text().contains(text))
+        })
+    }
+
+    #[test]
+    #[ignore = "requires a graphical display; run under xvfb-run"]
+    fn search_focus_and_reload_keep_the_ui_consistent() {
+        gtk::init().unwrap();
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("config.kdl");
+        let mut config = String::from(
+            "binds {\nMod+T hotkey-overlay-title=\"Open a Terminal\" { spawn \"kitty\"; }\n// Close window.\nMod+Q { close-window; }\n",
+        );
+        for key in 1..=24 {
+            config.push_str(&format!("Mod+F{key} {{ focus-workspace {key}; }}\n"));
+        }
+        config.push_str("}\n");
+        fs::write(&path, &config).unwrap();
+        let app = gtk::Application::builder()
+            .application_id("io.github.niri_keymap_help.test")
+            .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+            .build();
+        app.register(None::<&gtk::gio::Cancellable>).unwrap();
+        build(&app, &path);
+        let window = app.windows().into_iter().next().unwrap();
+        wait_for(|| has_label(&window, "26 of 26 bindings"));
+        let widgets = descendants(&window);
+        let search = widgets
+            .iter()
+            .find_map(|widget| widget.downcast_ref::<gtk::SearchEntry>())
+            .unwrap();
+        let scroll = widgets
+            .iter()
+            .find_map(|widget| widget.downcast_ref::<gtk::ScrolledWindow>())
+            .unwrap();
+        assert!(has_label(&window, "24 without descriptions"));
+        let focus = gtk::prelude::GtkWindowExt::focus(&window).unwrap();
+        assert!(focus == *search || focus.is_ancestor(search));
+        scroll.vadjustment().set_value(200.0);
+        search.set_text("MOD terminal");
+        wait_for(|| has_label(&window, "1 of 26 bindings"));
+        assert_eq!(scroll.vadjustment().value(), 0.0);
+        assert_eq!(
+            descendants(&window)
+                .iter()
+                .filter(|widget| { widget.is::<gtk::ListBoxRow>() && widget.is_visible() })
+                .count(),
+            1
+        );
+
+        fs::write(&path, "binds {\n").unwrap();
+        wait_for(|| has_label(&window, "Showing the last valid bindings"));
+        assert_eq!(search.text(), "MOD terminal");
+        assert!(has_label(&window, "1 of 26 bindings"));
+
+        fs::write(&path, config.replace("Open a Terminal", "Terminal updated")).unwrap();
+        wait_for(|| has_label(&window, "Terminal updated"));
+        assert_eq!(search.text(), "MOD terminal");
+        assert!(has_label(&window, "1 of 26 bindings"));
+        search.set_text("no-match-at-all");
+        assert!(has_label(&window, "0 of 26 bindings"));
+        assert!(has_label(&window, "No matching bindings"));
+        window.close();
+        wait_for(|| !window.is_visible());
+    }
+}
