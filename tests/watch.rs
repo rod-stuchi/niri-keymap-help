@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    fs, thread,
     time::{Duration, Instant},
 };
 
@@ -9,12 +9,16 @@ use tempfile::TempDir;
 fn next_matching(watcher: &Watcher, predicate: impl Fn(&LoadReport) -> bool) -> LoadReport {
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        let report = watcher
-            .updates
-            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            .expect("watcher should notice config changes");
-        if predicate(&report) {
-            return report;
+        match watcher.updates.try_recv() {
+            Ok(report) if predicate(&report) => return report,
+            Ok(_) => {}
+            Err(_) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "watcher should notice config changes"
+                );
+                thread::sleep(Duration::from_millis(10));
+            }
         }
     }
 }

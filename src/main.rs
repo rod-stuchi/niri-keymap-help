@@ -6,9 +6,12 @@ use gtk::{gio, prelude::*};
 use niri_keymap_help::{
     config::{self, DescriptionSource},
     sort::SortMode,
+    timing,
 };
 
 fn main() -> ExitCode {
+    timing::start();
+    timing::mark("main");
     let mut path = config::default_path();
     let mut check = false;
     let mut mode = SortMode::default();
@@ -86,15 +89,25 @@ fn main() -> ExitCode {
             }
         };
     }
+    // GTK's default Vulkan renderer costs ~90 ms more to start than its GL
+    // renderer, which is most of the time to first frame. Respect an explicit
+    // GSK_RENDERER from the user.
+    if env::var_os("GSK_RENDERER").is_none() {
+        // SAFETY: still single-threaded; GTK has not started yet.
+        unsafe { env::set_var("GSK_RENDERER", "ngl") };
+    }
     // Single instance: launching again (e.g. pressing the Niri bind twice)
     // raises the existing window instead of opening another one.
     let app = gtk::Application::builder()
         .application_id("io.github.niri_keymap_help")
         .flags(gio::ApplicationFlags::default())
         .build();
-    app.connect_activate(move |app| match app.windows().first() {
-        Some(window) => window.present(),
-        None => ui::build(app, &path, mode),
+    app.connect_activate(move |app| {
+        timing::mark("activate");
+        match app.windows().first() {
+            Some(window) => window.present(),
+            None => ui::build(app, &path, mode),
+        }
     });
     let code = app.run_with_args::<&str>(&[]);
     code.into()

@@ -3,24 +3,28 @@ use std::{
     fs,
     hash::{Hash, Hasher},
     path::{Path, PathBuf},
-    sync::mpsc::{self, Receiver, Sender},
+    sync::mpsc::{self, Sender},
     thread,
     time::Duration,
 };
 
-use crate::config::{self, LoadReport};
+use crate::{
+    config::{self, LoadReport},
+    timing,
+};
 
 /// Poll contents on a worker thread: handles atomic saves, symlink changes,
 /// missing directories, and creation of previously missing optional includes.
-/// No GTK work or filesystem reads run in the UI event loop.
+/// No GTK work or filesystem reads run in the UI event loop: reports are
+/// pushed through an async channel the UI awaits, so nothing polls it.
 pub struct Watcher {
-    pub updates: Receiver<LoadReport>,
+    pub updates: async_channel::Receiver<LoadReport>,
     stop: Sender<()>,
 }
 
 impl Watcher {
     pub fn start(path: PathBuf) -> Self {
-        let (sender, updates) = mpsc::channel();
+        let (sender, updates) = async_channel::unbounded();
         let (stop, stopped) = mpsc::channel();
         thread::spawn(move || {
             let mut files = BTreeSet::from([path.clone()]);
@@ -30,6 +34,7 @@ impl Watcher {
                 if current != previous {
                     let before = current;
                     let report = config::load(&path);
+                    timing::mark("config loaded (worker)");
                     if report.result.is_ok() {
                         files = report.files.clone();
                     } else {
@@ -43,7 +48,7 @@ impl Watcher {
                             previous.insert(file, stamp);
                         }
                     }
-                    if sender.send(report).is_err() {
+                    if sender.send_blocking(report).is_err() {
                         break;
                     }
                 }

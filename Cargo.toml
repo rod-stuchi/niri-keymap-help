@@ -5,6 +5,7 @@ edition = "2024"
 description = "A searchable GTK4 reference for your Niri key bindings"
 
 [dependencies]
+async-channel = "2"
 gtk = { package = "gtk4", version = "0.10.3", features = ["v4_8"] }
 kdl = "4.7.1"
 

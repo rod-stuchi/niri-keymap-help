@@ -71,6 +71,12 @@ binds {
 }
 ```
 
+Startup is tuned for a quick first frame: the config is read on a background
+thread while the window opens (a spinner shows if that takes longer), and the
+app uses GTK's `ngl` renderer, which starts noticeably faster than the default
+Vulkan one. Set `GSK_RENDERER` yourself to override it. To see where startup
+time goes, run with `NIRI_KEYMAP_HELP_TIMING=1`.
+
 Make sure the install directory is on Niri's `PATH`, or use an absolute binary path.
 The app is single-instance: launching it again raises the existing window.
 The app ID is `io.github.niri_keymap_help` if you want a Niri floating-window rule.
@@ -113,7 +119,7 @@ earlier conflicting keys; modifier order and common aliases are normalized.
 Separate shortcuts for the same action remain separate rows.
 
 Files are checked on a background thread every 350 ms, including atomic editor
-saves. Invalid edits display an error while retaining the last valid list and
+saves, and results are pushed to the window as they arrive. Invalid edits display an error while retaining the last valid list and
 current query. Includes are checked for cycles and excessive nesting.
 
 ## Development

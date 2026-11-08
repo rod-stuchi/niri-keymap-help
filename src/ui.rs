@@ -1,10 +1,11 @@
-use std::{cell::RefCell, collections::HashMap, path::Path, rc::Rc, time::Duration};
+use std::{cell::RefCell, collections::HashMap, path::Path, rc::Rc};
 
 use gtk::{gdk, glib, prelude::*};
 use niri_keymap_help::{
     config::{Binding, DescriptionSource, LoadReport},
     search,
     sort::{self, SortMode},
+    timing,
     watch::Watcher,
 };
 
@@ -35,6 +36,10 @@ struct View {
     missing: gtk::Label,
     message: gtk::Label,
     empty: gtk::Label,
+    /// Shown until the first report arrives, so the window can paint first.
+    loading: gtk::Box,
+    spinner: gtk::Spinner,
+    sort_mode: gtk::DropDown,
     scroll: gtk::ScrolledWindow,
 }
 
@@ -61,8 +66,15 @@ impl View {
             visible: groups,
         };
         self.list.invalidate_headers();
-        self.count
-            .set_text(&format!("{visible} of {} bindings", self.rows.len()));
+        let waiting = self.spinner.is_spinning();
+        self.loading.set_visible(waiting);
+        self.sort_mode.set_sensitive(self.loaded);
+        if self.loaded {
+            self.count
+                .set_text(&format!("{visible} of {} bindings", self.rows.len()));
+        } else {
+            self.count.set_text("Loading bindings…");
+        }
         self.missing
             .set_text(&format!("{missing} without descriptions"));
         self.missing.set_visible(missing > 0);
@@ -73,7 +85,7 @@ impl View {
         } else {
             "No matching bindings. Try a key, description, or command."
         });
-        self.empty.set_visible(visible == 0);
+        self.empty.set_visible(visible == 0 && !waiting);
         self.scroll.set_visible(visible > 0);
         if reset_scroll {
             self.scroll.vadjustment().set_value(0.0);
@@ -115,6 +127,7 @@ impl View {
     }
 
     fn update(&mut self, report: LoadReport) {
+        self.spinner.stop();
         match report.result {
             Ok(snapshot) => {
                 let scroll = self.scroll.vadjustment().value();
@@ -267,6 +280,22 @@ pub fn build(app: &gtk::Application, path: &Path, mode: SortMode) {
     let empty = gtk::Label::builder().wrap(true).vexpand(true).build();
     empty.add_css_class("empty-state");
     content.append(&empty);
+    let spinner = gtk::Spinner::builder()
+        .spinning(true)
+        .width_request(32)
+        .height_request(32)
+        .build();
+    let loading = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(12)
+        .valign(gtk::Align::Center)
+        .halign(gtk::Align::Center)
+        .vexpand(true)
+        .build();
+    loading.add_css_class("loading-state");
+    loading.append(&spinner);
+    loading.append(&gtk::Label::new(Some("Loading keymaps…")));
+    content.append(&loading);
 
     let footer = gtk::Box::new(gtk::Orientation::Horizontal, 12);
     footer.add_css_class("footer");
@@ -299,6 +328,9 @@ pub fn build(app: &gtk::Application, path: &Path, mode: SortMode) {
         missing,
         message,
         empty,
+        loading,
+        spinner,
+        sort_mode: sort_mode.clone(),
         scroll: scroll.clone(),
     }));
     view.borrow().filter(false);
@@ -397,26 +429,36 @@ pub fn build(app: &gtk::Application, path: &Path, mode: SortMode) {
     ));
 
     let watcher = Watcher::start(path.to_path_buf());
-    glib::timeout_add_local(
-        Duration::from_millis(100),
-        glib::clone!(
-            #[weak]
-            window,
-            #[upgrade_or]
-            glib::ControlFlow::Break,
-            move || {
-                if !window.is_visible() {
-                    return glib::ControlFlow::Break;
-                }
-                if let Some(report) = watcher.updates.try_iter().last() {
-                    view.borrow_mut().update(report);
-                }
-                glib::ControlFlow::Continue
+    // Handle reports as soon as the worker sends them. The future owns the
+    // watcher, so it (and its thread) stops once the window is gone.
+    let window_ref = window.downgrade();
+    glib::spawn_future_local(async move {
+        while let Ok(mut report) = watcher.updates.recv().await {
+            // Only the newest of several queued reports matters.
+            while let Ok(newer) = watcher.updates.try_recv() {
+                report = newer;
             }
-        ),
-    );
+            let Some(window) = window_ref.upgrade().filter(|window| window.is_visible()) else {
+                break;
+            };
+            timing::mark("report received (ui)");
+            view.borrow_mut().update(report);
+            timing::mark("rows built");
+            mark_next_frame(&window, "list painted");
+        }
+    });
     window.present();
+    timing::mark("build: window presented");
+    mark_next_frame(&window, "first frame");
     search.grab_focus();
+}
+
+/// Log once when the next frame is drawn (startup timing only).
+fn mark_next_frame(window: &impl IsA<gtk::Widget>, label: &'static str) {
+    window.add_tick_callback(move |_, _| {
+        timing::mark(label);
+        glib::ControlFlow::Break
+    });
 }
 
 fn binding_row(binding: &Binding) -> (gtk::ListBoxRow, gtk::Label) {
@@ -481,7 +523,10 @@ fn binding_row(binding: &Binding) -> (gtk::ListBoxRow, gtk::Label) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{fs, thread, time::Instant};
+    use std::{
+        fs, thread,
+        time::{Duration, Instant},
+    };
 
     fn descendants(widget: &impl IsA<gtk::Widget>) -> Vec<gtk::Widget> {
         let mut result = Vec::new();
@@ -541,7 +586,16 @@ mod tests {
         app.register(None::<&gtk::gio::Cancellable>).unwrap();
         build(&app, &path, SortMode::Config);
         let window = app.windows().into_iter().next().unwrap();
+        // The window is built before any config is read: a spinner shows first.
+        let spinner = descendants(&window)
+            .into_iter()
+            .find_map(|widget| widget.downcast::<gtk::Spinner>().ok())
+            .unwrap();
+        let loading = spinner.parent().unwrap();
+        assert!(spinner.is_spinning() && loading.is_visible());
+        assert!(has_label(&window, "Loading bindings…"));
         wait_for(|| has_label(&window, "26 of 26 bindings"));
+        assert!(!spinner.is_spinning() && !loading.is_visible());
         let widgets = descendants(&window);
         let search = widgets
             .iter()
