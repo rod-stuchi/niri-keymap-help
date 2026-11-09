@@ -89,12 +89,13 @@ fn main() -> ExitCode {
             }
         };
     }
-    // GTK's default Vulkan renderer costs ~90 ms more to start than its GL
-    // renderer, which is most of the time to first frame. Respect an explicit
-    // GSK_RENDERER from the user.
+    // GPU renderers (vulkan, ngl, gl) spend ~800 ms setting up the GPU context
+    // before the first frame on some drivers (NVIDIA); the cairo software
+    // renderer puts pixels on screen in ~300 ms and a list of text is cheap to
+    // draw on the CPU. Respect an explicit GSK_RENDERER from the user.
     if env::var_os("GSK_RENDERER").is_none() {
         // SAFETY: still single-threaded; GTK has not started yet.
-        unsafe { env::set_var("GSK_RENDERER", "ngl") };
+        unsafe { env::set_var("GSK_RENDERER", "cairo") };
     }
     // Single instance: launching again (e.g. pressing the Niri bind twice)
     // raises the existing window instead of opening another one.

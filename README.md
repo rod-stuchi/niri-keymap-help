@@ -73,8 +73,9 @@ binds {
 
 Startup is tuned for a quick first frame: the config is read on a background
 thread while the window opens (a spinner shows if that takes longer), and the
-app uses GTK's `ngl` renderer, which starts noticeably faster than the default
-Vulkan one. Set `GSK_RENDERER` yourself to override it. To see where startup
+app uses GTK's `cairo` software renderer by default. GPU renderers can take
+close to a second to set up before the first frame (notably on NVIDIA), while
+cairo shows the window in about 0.3 s. Set `GSK_RENDERER` yourself to override it. To see where startup
 time goes, run with `NIRI_KEYMAP_HELP_TIMING=1`.
 
 Make sure the install directory is on Niri's `PATH`, or use an absolute binary path.

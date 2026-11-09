@@ -449,11 +449,14 @@ pub fn build(app: &gtk::Application, path: &Path, mode: SortMode) {
     });
     window.present();
     timing::mark("build: window presented");
-    mark_next_frame(&window, "first frame");
+    mark_next_frame(&window, "first frame clock tick");
     search.grab_focus();
 }
 
-/// Log once when the next frame is drawn (startup timing only).
+/// Log once when the next frame clock tick starts (startup timing only). This
+/// is before GTK renders and presents the frame, so GPU setup cost is not
+/// included; use `WAYLAND_DEBUG=client` and look for `wl_surface.attach` to
+/// see when pixels actually reach the compositor.
 fn mark_next_frame(window: &impl IsA<gtk::Widget>, label: &'static str) {
     window.add_tick_callback(move |_, _| {
         timing::mark(label);
